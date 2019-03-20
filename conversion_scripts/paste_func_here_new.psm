@@ -1,0 +1,606 @@
+;-----------------------------------------------------------------------------------
+; Software Implementation of Floating-Point Arithmetic, Double-Precision (64 bit).
+;
+;	beta(radix) = 2, k(width) = 64, p(precision) = 53, e_max = 1023
+;
+;------------------------------------------------------------------------------------
+; Procedure:			arith_div_x_y()
+;
+; Registers Used:	Bank0 : All
+;					Bank1 : None		
+;		
+; Arguments:			Bank0 : 
+;					Bank1 : None
+;					SPM   : x = [x_7, x_6, ..., x_0]
+;			      			y = [y_7, y_6, ..., y_0]						
+;
+; Calls:				set_ops_status
+;					decompose_x
+;					decompose_y
+;					
+;
+; RETs:				None
+; 
+; RETURN Flags:			None
+;
+; Description:		Divides two 64-bit double-precision floating point numbers.
+;------------------------------------------------------------------------------------
+arith_div_x_y:
+	CALL 	set_ops_status
+	CALL 	decompose_x
+	CALL 	decompose_y
+	CALL 	div_special_cases
+	COMPARE	sF, FF
+	JUMP	Z, done_dividing
+	CALL 	mul_normalize_mx
+	CALL 	mul_normalize_my
+	; op1 and op2 both are normal	
+	CALL 	div_mx_my		; result is in [Umr_6, Lmr_6]
+	CALL	sub_Ex_Ey		; exponent of result in [s1, s0]
+	JUMP	NC, no_sub_ex_ey_overflow
+	LOAD	sC, 01			; Set flag
+no_sub_ex_ey_overflow:
+	LOAD	sC, 00
+	; Save the er
+	STORE	s0, r_ex6
+	STORE	s1, r_ex7
+	; Check the result exponent
+	;---------------------------------------------------------------
+	; if er < 0 and er > -53 then result is subnormal, shift significand by er and set the er to zero
+	; if er < 0 and er <= -53 then the result is zero (underflow).
+	; if er = 0 then the result is subnormal but no shift is needed.	
+	; if er > 0 then the result is normal.
+	; if er > 7FE then the result is infinity.
+	; -53 = FFDD = - 0023
+	; Read the mr [Umr_6 downto Lmr_6] (64-bits) 
+div_result_not_inf:
+	FETCH	s7, Umr_6
+	FETCH	s6, Umr_5
+	FETCH	s5, Umr_4
+	FETCH	s4, Umr_3
+	FETCH	s3, Umr_2
+	FETCH	s2, Umr_1
+	FETCH	s1, Umr_0
+	FETCH	s0, Lmr_6		
+	; Set the sticky bit
+	LOAD	sE, 06			; Counter
+	LOAD	sF, s0			; Copy s0
+div_set_sticky_bit_loop:	
+	SR0		sF
+	JUMP	NC,	dont_turn_sticky_bit_on
+	OR		s0, 20			; Turn sticky bit on
+dont_turn_sticky_bit_on:	
+	SUB		sE, 01
+	JUMP	NZ, div_set_sticky_bit_loop
+	FETCH	sB, r_ex7
+	FETCH	sA, r_ex6
+	TEST	sB, 80
+	JUMP	Z,	div_check_overflow		; Normal case, so skip all subnormal tests, and check compose result if there is no overflow
+	; Here we are sure that the er is negative 	
+	XOR		sB, FF		; Find the twos's complement of er
+	XOR		sA, FF
+	ADD		sA, 01
+	ADDCY	sB, 00
+	COMPARE 	sA, 34
+	COMPARECY	sB, 00
+	JUMP	Z, div_result_is_zero	; er = -53, underflow
+	JUMP 	C, div_er_greater_than_53	; er > -53, subnormal
+	JUMP	div_result_is_zero		; er < -53. underflow
+div_er_greater_than_53:	
+div_keep_shifting_mr_to_right:
+	SR0		s7
+	SRA	s6
+	SRA	s5	
+	SRA	s4	
+	SRA	s3	
+	SRA	s2	
+	SRA	s1
+	SRA	s0
+	SUB		sA, 01
+	SUBCY	sB, 00
+	JUMP	NZ, div_keep_shifting_mr_to_right
+	; Here [sB, sA] must be zero
+	; Save the er
+	STORE	sA, r_ex6
+	STORE	sB, r_ex7
+	JUMP	div_dont_shift_mr_left_subnormal
+ div_check_overflow:	
+	; exponent is in [sB, sA], check if result exp. > 7FF? 
+	COMPARE 	sA, FF
+	COMPARECY	sB, 07
+	JUMP	Z, div_compose_result
+	JUMP	C, div_compose_result	 	
+	; Overflow
+	JUMP 	return_inf
+div_compose_result:	
+	; Significance now is in [s7, s0] with these structure:
+	;		s6       _ s5,...,s1 _ 
+	;		hsss_ssss_  ss...ss  _ ssss_sggg
+	; h means hidden bit, s means significance, g means three guard bits
+	; Check Bit 53, if it is 0 we have to shift left by 1 otherwise don't do anything
+	TEST	s7, 80
+	JUMP	NZ, div_dont_shift_mr_left
+	SL0		s0
+	SLA	s1
+	SLA	s2
+	SLA	s3
+	SLA	s4
+	SLA	s5
+	SLA	s6
+	SLA	s7
+	; Load the er
+	FETCH	sE, r_ex6
+	FETCH	sF, r_ex7
+	SUB		sE, 01
+	SUBCY	sF, 00
+	; Save the er
+	STORE	sE, r_ex6
+	STORE	sF, r_ex7
+	JUMP	div_dont_shift_mr_left
+div_dont_shift_mr_left_subnormal:	
+	SR0		s7
+	SRA	s6
+	SRA	s5
+	SRA	s4
+	SRA	s3
+	SRA	s2
+	SRA	s1
+	SRA	s0
+div_dont_shift_mr_left:
+	; now the significance is [s7 downto s1] with following pattern:
+	; s7		s6,...,s2 s1
+	; xsss ssss
+	; shift to right by 3 
+	SR0		s7
+	SRA	s6
+	SRA	s5
+	SRA	s4
+	SRA	s3
+	SRA	s2
+	SRA	s1
+	SRA	s0
+	SR0		s7
+	SRA	s6
+	SRA	s5
+	SRA	s4
+	SRA	s3
+	SRA	s2
+	SRA	s1
+	SRA	s0	
+	SR0		s7
+	SRA	s6
+	SRA	s5
+	SRA	s4
+	SRA	s3
+	SRA	s2
+	SRA	s1
+	SRA	s0
+	TEST	sC, 01
+	JUMP 	NZ, div_no_exp_overflow_detected
+	SR0		s7
+	SRA	s6
+	SRA	s5
+	SRA	s4
+	SRA	s3
+	SRA	s2
+	SRA	s1
+	SRA	s0
+div_no_exp_overflow_detected:	
+	; Now significance is in [s7, s1]
+	AND		s7, 0F	
+	; Round	the significance s1 lowest byte, s0 has guard bits.
+	CALL	div_round
+	; Propogate the carry produced by possible rounding
+	ADDCY	s2, 00
+	ADDCY	s3, 00
+	ADDCY	s4, 00
+	ADDCY	s5, 00
+	ADDCY	s6, 00	
+	ADDCY	s7, 00	
+	; Load the er
+	FETCH	sE, r_ex6
+	FETCH	sF, r_ex7
+	; Compose the result
+	; Combine exponent [sF, sE] and significand [s6, ..., s0]
+	; Shift exponent to left by 4
+	SL0		sE
+	SLA	sF
+	SL0		sE
+	SLA	sF
+	SL0		sE
+	SLA	sF
+	SL0		sE
+	SLA	sF
+	; Combine the exponent with significand
+	OR		sE, s7
+	; Calculate the sign
+	FETCH	sB,	x_sign
+	FETCH	sA,	y_sign
+	XOR		sB, sA			; Calculate the sign
+	AND		sB, 80	
+	OR		sF, sB			; Apply the sign
+	; Save the result in SMP
+	STORE 	s1, r_0
+	STORE 	s2, r_1
+	STORE 	s3, r_2
+	STORE 	s4, r_3
+	STORE 	s5, r_4
+	STORE 	s6, r_5
+	STORE 	sE, r_6 
+	STORE 	sF, r_7	
+	jump	done_dividing	
+div_result_is_zero:
+	CALL	return_zero_mul	
+done_dividing:	
+	RETURN
+    
+;------------------------------------------------------------------------------------
+; Procedure:			div_special_cases()
+;
+; Registers Used:	Bank0 : s1, s2
+;					Bank1 : None		
+;		
+; Arguments:			Bank0 : None
+;					Bank1 : None
+;			      			
+;
+; Calls:				
+;
+; RETs:				Bank1: [s1. s0]
+; 
+; RETURN Flags:			None
+;
+; Description:		Takes care of special operands in division.
+;					Return FF in sF if one of the operands is special.
+;					If sF is FF then the result is already in [r_7, r_8] in SPM.
+;------------------------------------------------------------------------------------	
+div_special_cases:
+	FETCH 	s1, op1_status	; read the ops status
+	FETCH 	s2, op2_status	; read the ops status
+	; We check op1 for 
+	; 1) NaN
+	;		Yes:	return X_NaN	
+	;		No:		Go to step 2.
+	; 2) Infinity
+	;		Yes:	Check op2, if +0 and NaN then return_NaN_Inf
+	;		No:		return +infinity
+	; 3) Zero
+	;		Yes:	check if op2 is +inf or NaN then return_NaN_Inf
+	;				 else return 0
+	;		No:		check op2
+	;-----------------------------------------------
+	; Check if op1 is NaN
+	TEST	s1, 10
+	JUMP	Z, div_final_op1_not_NaN		; No
+div_final_op1_NaN:						; Yes
+	; Check if op2 is NaN
+	TEST	s2, 10
+	JUMP 	NZ, return_xy_NAN	; Yes
+	JUMP	return_x_NAN
+div_final_op1_not_NaN:
+	; Check if op1 is Inf
+	TEST	s1, 20
+	JUMP	Z, div_final_op1_not_Inf		; No
+div_final_op1_Inf:						; Yes
+	; Check if op2 is zero
+	TEST	s2, 40
+	JUMP	NZ, return_pos_inf			; Yes
+	; Check if op2 is Inf
+	TEST	s2, 20
+	JUMP	NZ, div_return_NAN				; Yes
+	; Check if op2 is NaN
+	TEST	s2, 10
+	JUMP	NZ, return_y_NAN				; Yes
+	JUMP	return_x_Inf		
+div_final_op1_not_Inf:	
+	; Check if op1 is zero
+	TEST	s1, 40
+	JUMP	Z, div_check_final_op2		; No
+div_final_op1_is_zero:
+	; Check if op2 is zero
+	TEST	s2, 40
+	JUMP	NZ, return_div_NAN				; Yes
+	; Check if op2 is NaN
+	TEST	s2, 10
+	JUMP	NZ, return_y_NAN_positive		;Yes
+	JUMP	return_zero_mul
+div_check_final_op2:				; Here we are sure op1 is (sub)normal
+	; Check if op2 is NaN
+	TEST	s2, 10
+	JUMP	NZ, div_return_y_NAN_positive		;Yes
+	JUMP	div_final_op2_not_NaN	
+div_return_y_NAN_positive:
+	; make y positive
+	LOAD 	sE, 7F
+	FETCH	sD, y_7
+	AND		sD, sE
+	STORE	sD, y_7	
+	JUMP	return_y_NAN
+div_final_op2_not_NaN:					; No
+	; Check if op2 is Infinity
+	TEST	s2, 20
+	JUMP	NZ, return_zero_mul			; Yes
+	; Check if op2 is zero
+	TEST	s2, 40
+	JUMP	NZ, return_x_Inf				; Yes
+	; Both operators are (sub)normal. Perform the multiplication.
+	LOAD	sF, 00
+	RETURN	
+    
+;------------------------------------------------------------------------------------
+; Procedure:			div_mx_my()
+;
+; Registers Used:	Bank0 : All
+;					Bank1 : None		
+;		
+; Arguments:			Bank0 : None
+;					Bank1 : None
+;					SPM   : x_m6, x_m5, ... x_m0 (7-bytes)
+;							y_m6, y_m5, ... y_m0	 (7-bytes)
+;			      			
+;
+; Calls:				
+;
+; RETs:				Bank0: [s6 doento s0] is reminder
+;					Bank1: [s6 downto s0] is Quotient
+; 
+; RETURN Flags:			None
+;
+; Description:		Divides two 53-bit double-precision floating point numbers.
+;------------------------------------------------------------------------------------
+div_mx_my:
+	; Set quotient [s7, s0] to 0
+	REGBANK B
+	LOAD	s0, 00
+	LOAD	s1, 00
+	LOAD	s2, 00
+	LOAD	s3, 00
+	LOAD	s4, 00
+	LOAD	s5, 00
+	LOAD	s6, 00
+	LOAD	s7, 00
+	REGBANK A
+	; Load mx: dividend
+	LOAD	s7, 00
+	FETCH 	s6, x_m6
+	FETCH	s5, x_m5
+	FETCH 	s4, x_m4
+	FETCH 	s3, x_m3
+	FETCH 	s2, x_m2
+	FETCH 	s1, x_m1
+	FETCH 	s0, x_m0
+	; Load my: divisor
+	LOAD	sF, 00
+	FETCH 	sE, y_m6
+	FETCH	sD, y_m5
+	FETCH 	sC, y_m4
+	FETCH 	sB, y_m3
+	FETCH 	sA, y_m2
+	FETCH 	s9, y_m1
+	FETCH 	s8, y_m0
+	REGBANK B
+	LOAD	sF, 40			; This is the counter, we need to loop 64 times
+	REGBANK A
+compare_dividend:
+	; Is dividend >= divisor ?
+	COMPARE	s0, s8
+	COMPARECY	s1, s9
+	COMPARECY	s2, sA
+	COMPARECY	s3, sB
+	COMPARECY	s4, sC
+	COMPARECY	s5, sD
+	COMPARECY	s6, sE
+	COMPARECY	s7, sF
+	JUMP	C, dividend_is_less
+	; dividend is greateror than divisor
+	; mx - my
+	SUB		s0, s8
+	SUBCY	s1, s9
+	SUBCY	s2, sA
+	SUBCY	s3, sB
+	SUBCY	s4, sC
+	SUBCY	s5, sD
+	SUBCY	s6, sE
+	SUBCY	s7, sF
+	; Append 1 to quotient
+	REGBANK	B
+	SL1		s0
+	SLA	s1
+	SLA	s2	 
+	SLA	s3	 
+	SLA	s4	 
+	SLA	s5	 
+	SLA	s6	 
+	SLA	s7	 
+	REGBANK A
+	JUMP	shift_dividend_left
+dividend_is_less:	
+	; Append 0 to quotient
+	REGBANK	B
+	SL0		s0
+	SLA	s1	 
+	SLA	s2	 
+	SLA	s3	 
+	SLA	s4	 
+	SLA	s5	 
+	SLA	s6	
+	SLA	s7	 
+	REGBANK A
+shift_dividend_left:		
+	; Shift mx (dividend) to left by 1
+	SL0		s0
+	SLA	s1
+	SLA	s2
+	SLA	s3
+	SLA	s4
+	SLA	s5
+	SLA	s6
+	SLA	s7
+	REGBANK	B
+	SUB		sF, 01		; Decrement the counter
+	REGBANK	A
+	JUMP	NZ, compare_dividend
+div_finished:
+	REGBANK	B
+	STORE	s7, Umr_6 
+	STORE	s6, Umr_5 
+	STORE	s5, Umr_4 
+	STORE	s4, Umr_3 
+	STORE	s3, Umr_2 
+	STORE	s2, Umr_1 
+	STORE	s1, Umr_0
+	STORE	s0, Lmr_6
+	REGBANK A 
+	RETURN
+    
+;------------------------------------------------------------------------------------
+; Procedure:			sub_Ex_Ey()
+;
+; Registers Used:	Bank0 : All
+;					Bank1 : None		
+;		
+; Arguments:			Bank0 : None
+;					Bank1 : None
+;					SPM   : x_m6, x_m5, ... x_m0 (7-bytes)
+;							y_m6, y_m5, ... y_m0	 (7-bytes)
+;			      			
+;
+; Calls:				
+;
+; RETs:				Bank1: [s1. s0]
+; 
+; RETURN Flags:			None
+;
+; Description:		Calculates the ex + ey which is Ex + Ey - bias(1023) and returns
+;						the result in [s1, s0].
+;------------------------------------------------------------------------------------
+sub_Ex_Ey:	
+	; Read ex
+	FETCH 	s1, x_ex7
+	FETCH 	s0, x_ex6
+	; if op1 is subnormal then subtract by 1022 else subtract by  1023
+	FETCH	sF, op1_status
+	TEST	sF, 80
+	JUMP	NZ,	sub_subnormal_exponent_detected
+	; Subtract by 1023
+	SUB		s0, FF
+	SUBCY	s1,	03		
+	JUMP	sub_done_exponent_subtracting
+sub_subnormal_exponent_detected:			
+	; Subtract by 1022
+	SUB		s0, FE
+	SUBCY	s1,	03		
+sub_done_exponent_subtracting:	
+	; Read ey
+	FETCH 	s3, y_ex7
+	FETCH 	s2, y_ex6
+	; if [s1, s0] == zero then subtract 1022 else subtract 1023
+	FETCH	sF, op2_status
+	TEST	sF, 80
+	JUMP	NZ,	sub_subnormal_exponent_detected_y
+	; Subtract by 1023
+	SUB		s2, FF
+	SUBCY	s3,	03		
+	JUMP	sub_done_exponent_subtracting_y
+sub_subnormal_exponent_detected_y:			
+	; Subtract by 1022
+	SUB		s2, FE
+	SUBCY	s3,	03		
+sub_done_exponent_subtracting_y:
+	SUB		s0, s2
+	SUBCY	s1, s3
+	ADD		s0, FF			; subtract by 1023'd =  03FF
+	ADDCY	s1, 03
+	RETURN
+	
+return_div_NAN:
+	LOAD	sF, FF
+	LOAD	s7, 7F	       
+	LOAD	s6, F8	   
+	LOAD 	s5, 00
+	LOAD 	s4, 00
+	LOAD 	s3, 00
+	LOAD 	s2, 00
+	LOAD 	s1, 00
+	LOAD 	s0, 00
+	STORE 	s7, r_7
+	STORE 	s6, r_6
+	STORE 	s5, r_5
+	STORE 	s4, r_4
+	STORE 	s3, r_3
+	STORE 	s2, r_2
+	STORE 	s1, r_1
+	STORE 	s0, r_0
+	RETURN	
+	
+	;-------------------------------------------------------------
+	; s1 has the lowest byte, and s0 has the guard bits
+div_round: 
+	; -------------------------------------------------
+	; Calculate the sticky bit
+	; Check the guard bit - s0[7]
+	TEST 	s0, 80
+	JUMP 	NZ, div_guard_bit_is_1
+	; Gaurd bit = 0 : Round down (Do  nothing)
+	JUMP 	div_round_RET_zero
+div_guard_bit_is_1:
+	; Gaurd bit = 1, Check the round bit
+	TEST 	s0, 40
+	JUMP 	Z, div_round_bit_is_0	
+	; Gaurd bit = 1, Round bit = 1 : Round Up (add 1 to mantissa)
+	JUMP 	div_round_RET_one
+div_round_bit_is_0:
+	; Gaurd bit = 1, Round bit = 0 : Check the Sticky bit
+	TEST 	s0, 20
+	JUMP 	NZ, div_round_RET_one ; Gaurd bit = 1, Round bit = 0 , Sticky bit = 1 : Round Up (add 1 to mantissa)
+	; Gaurd bit = 1, Round bit = 0 , Sticky bit = 0 : Round to nearest even,
+	;       Means round up if bit before Guard bit is 1, else round down.
+	;TEST 	s1, 01
+	;JUMP 	Z, div_round_RET_zero
+div_round_RET_one:
+    ADD 		s1, 01
+div_round_RET_zero:
+    RETURN		
+    
+return_inf:
+	LOAD 	sF, FF			; Signal the caller that the operation is complete.
+	; Calculate the sign
+	FETCH	sB,	x_sign
+	FETCH	sA,	y_sign
+	XOR		sB, sA			; Calculate the sign
+	AND		sB, 80	
+	LOAD	s2,	7F
+	OR		s2, sB			; Apply the sign
+	LOAD	s1,	F0
+	LOAD	s0, 00      
+	STORE 	s2, r_7
+	STORE 	s1, r_6
+	STORE 	s0, r_5
+	STORE 	s0, r_4
+	STORE 	s0, r_3
+	STORE 	s0, r_2
+	STORE 	s0, r_1
+	STORE 	s0, r_0	
+	RETURN    
+
+div_return_NAN:
+	LOAD 	sF, FF			; Signal the caller that the operation is complete.
+	; Calculate the sign
+	FETCH	sB,	x_sign
+	FETCH	sA,	y_sign
+	XOR		sB, sA			; Calculate the sign
+	AND		sB, 80	
+	LOAD	s2,	7F
+	;OR		s2, sB			; Apply the sign
+	LOAD	s1,	F8
+	LOAD	s0, 00      
+	STORE 	s2, r_7
+	STORE 	s1, r_6
+	STORE 	s0, r_5
+	STORE 	s0, r_4
+	STORE 	s0, r_3
+	STORE 	s0, r_2
+	STORE 	s0, r_1
+	STORE 	s0, r_0	
+	RETURN	
+
